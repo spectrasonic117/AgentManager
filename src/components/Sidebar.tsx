@@ -23,9 +23,7 @@ const RESOURCE_COLORS: Record<ResourceType, string> = {
 
 export function Sidebar() {
   const { resources, selectedResource, searchQuery, setSearchQuery, selectResource, createResource } = useApp();
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
-    new Set(['agents', 'subagents', 'skills', 'mcp_servers', 'hooks', 'system_prompts'])
-  );
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [isCreating, setIsCreating] = useState<ResourceType | null>(null);
   const [newName, setNewName] = useState('');
 
@@ -41,9 +39,9 @@ export function Sidebar() {
     });
   };
 
-  const handleCreate = (type: ResourceType) => {
+  const handleCreate = async (type: ResourceType) => {
     if (newName.trim()) {
-      if (createResource(type, newName.trim())) {
+      if (await createResource(type, newName.trim())) {
         setNewName('');
         setIsCreating(null);
       }

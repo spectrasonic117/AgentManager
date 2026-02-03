@@ -19,9 +19,9 @@ export function Editor() {
     }
   }, [selectedResource]);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (selectedResource && hasChanges) {
-      if (updateResource(selectedResource.id, { name, content })) {
+      if (await updateResource(selectedResource.id, { name, content })) {
         setHasChanges(false);
       }
     }
@@ -34,9 +34,9 @@ export function Editor() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (selectedResource && confirm(`Are you sure you want to delete "${selectedResource.name}"?`)) {
-      deleteResource(selectedResource.id);
+      await deleteResource(selectedResource.id);
     }
   };
 
