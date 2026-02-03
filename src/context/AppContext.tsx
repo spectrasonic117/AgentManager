@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, ReactNode, useEffect } from 'react';
 import { Resource, ResourceType } from '../types';
+import { supabase } from '../lib/supabase';
 
 interface AppContextType {
   resources: Resource[];
@@ -11,78 +12,109 @@ interface AppContextType {
   setIsEditorMode: (mode: boolean) => void;
   setIsSidebarOpen: (open: boolean) => void;
   selectResource: (resource: Resource | null) => void;
-  createResource: (type: ResourceType, name: string) => boolean;
-  updateResource: (id: string, updates: Partial<Resource>) => boolean;
-  deleteResource: (id: string) => void;
+  createResource: (type: ResourceType, name: string) => Promise<boolean>;
+  updateResource: (id: string, updates: Partial<Resource>) => Promise<boolean>;
+  deleteResource: (id: string) => Promise<void>;
   showNotification: (message: string, type?: 'success' | 'error' | 'info') => void;
+  isLoading: boolean;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
-const STORAGE_KEY = 'ai_agent_resources';
-
 export function AppProvider({ children }: { children: ReactNode }) {
-  const [resources, setResources] = useState<Resource[]>(() => {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        return parsed.map((r: Resource) => ({
-          ...r,
-          createdAt: new Date(r.createdAt),
-          updatedAt: new Date(r.updatedAt),
-        }));
-      } catch {
-        return [];
-      }
-    }
-    return [];
-  });
-
+  const [resources, setResources] = useState<Resource[]>([]);
   const [selectedResource, setSelectedResource] = useState<Resource | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [isEditorMode, setIsEditorMode] = useState(true);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [notification, setNotification] = useState<{ message: string; type: string } | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
+  // Load resources from Supabase
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(resources));
-  }, [resources]);
+    async function loadResources() {
+      setIsLoading(true);
+      const { data, error } = await supabase
+        .from('resources')
+        .select('*')
+        .order('updatedAt', { ascending: false });
+
+      if (error) {
+        console.error('Error loading resources:', error);
+        showNotification('Error loading data from cloud', 'error');
+        // Fallback to local storage if needed
+        const stored = localStorage.getItem('ai_agent_resources');
+        if (stored) setResources(JSON.parse(stored));
+      } else if (data) {
+        const parsedData = data.map(r => ({
+          ...r,
+          createdAt: new Date(r.createdAt),
+          updatedAt: new Date(r.updatedAt),
+        }));
+        setResources(parsedData);
+      }
+      setIsLoading(false);
+    }
+
+    loadResources();
+  }, []);
 
   const selectResource = (resource: Resource | null) => {
     setSelectedResource(resource);
   };
 
-  const createResource = (type: ResourceType, name: string): boolean => {
+  const createResource = async (type: ResourceType, name: string): Promise<boolean> => {
     const trimmedName = name.trim();
     if (resources.some(r => r.name.toLowerCase() === trimmedName.toLowerCase())) {
       showNotification(`A resource with the name "${trimmedName}" already exists`, 'error');
       return false;
     }
 
-    const newResource: Resource = {
+    const newResource = {
       id: crypto.randomUUID(),
       name: trimmedName,
       content: `# ${trimmedName}\n\nStart writing your ${type.replace('_', ' ')} configuration here...`,
       type,
       folderPath: type,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
-    setResources(prev => [...prev, newResource]);
-    setSelectedResource(newResource);
+
+    const { error } = await supabase.from('resources').insert([newResource]);
+
+    if (error) {
+      console.error('Supabase Insert Error:', error);
+      showNotification('Error saving to cloud', 'error');
+      return false;
+    }
+
+    const resourceWithDates = {
+      ...newResource,
+      createdAt: new Date(newResource.createdAt),
+      updatedAt: new Date(newResource.updatedAt)
+    };
+
+    setResources(prev => [resourceWithDates, ...prev]);
+    setSelectedResource(resourceWithDates);
     showNotification(`${trimmedName} created successfully`, 'success');
     return true;
   };
 
-  const updateResource = (id: string, updates: Partial<Resource>): boolean => {
-    if (updates.name) {
-      const trimmedName = updates.name.trim();
-      if (resources.some(r => r.id !== id && r.name.toLowerCase() === trimmedName.toLowerCase())) {
-        showNotification(`A resource with the name "${trimmedName}" already exists`, 'error');
-        return false;
-      }
-      updates.name = trimmedName;
+  const updateResource = async (id: string, updates: Partial<Resource>): Promise<boolean> => {
+    const dbUpdates = {
+      ...updates,
+      updatedAt: new Date().toISOString()
+    };
+
+    const { error } = await supabase
+      .from('resources')
+      .update(dbUpdates)
+      .eq('id', id);
+
+    if (error) {
+      console.error('Supabase Update Error:', error);
+      showNotification('Error updating cloud data', 'error');
+      return false;
     }
 
     setResources(prev =>
@@ -92,6 +124,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           : r
       )
     );
+    
     if (selectedResource?.id === id) {
       setSelectedResource(prev => prev ? { ...prev, ...updates, updatedAt: new Date() } : null);
     }
@@ -99,7 +132,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return true;
   };
 
-  const deleteResource = (id: string) => {
+  const deleteResource = async (id: string) => {
+    const { error } = await supabase
+      .from('resources')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      console.error('Supabase Delete Error:', error);
+      showNotification('Error deleting from cloud', 'error');
+      return;
+    }
+
     setResources(prev => prev.filter(r => r.id !== id));
     if (selectedResource?.id === id) {
       setSelectedResource(null);
@@ -128,6 +172,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         updateResource,
         deleteResource,
         showNotification,
+        isLoading,
       }}
     >
       {children}
