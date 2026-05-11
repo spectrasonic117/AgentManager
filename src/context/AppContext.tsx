@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, ReactNode, useEffect } from 'react';
 import { Resource, ResourceType } from '../types';
-import { supabase } from '../lib/supabase';
+
+const STORAGE_KEY = 'ai_agent_resources';
 
 interface AppContextType {
   resources: Resource[];
@@ -15,11 +16,37 @@ interface AppContextType {
   createResource: (type: ResourceType, name: string) => Promise<boolean>;
   updateResource: (id: string, updates: Partial<Resource>) => Promise<boolean>;
   deleteResource: (id: string) => Promise<void>;
+  exportData: () => void;
+  importData: (file: File) => Promise<void>;
   showNotification: (message: string, type?: 'success' | 'error' | 'info') => void;
   isLoading: boolean;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
+
+function loadFromStorage(): Resource[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      return JSON.parse(raw).map((r: any) => ({
+        ...r,
+        createdAt: new Date(r.createdAt),
+        updatedAt: new Date(r.updatedAt),
+      }));
+    }
+  } catch (e) {
+    console.error('Failed to load resources:', e);
+  }
+  return [];
+}
+
+function saveToStorage(resources: Resource[]): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(resources));
+  } catch (e) {
+    console.error('Failed to save resources:', e);
+  }
+}
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [resources, setResources] = useState<Resource[]>([]);
@@ -30,33 +57,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [notification, setNotification] = useState<{ message: string; type: string } | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Load resources from Supabase
   useEffect(() => {
-    async function loadResources() {
-      setIsLoading(true);
-      const { data, error } = await supabase
-        .from('resources')
-        .select('*')
-        .order('updatedAt', { ascending: false });
-
-      if (error) {
-        console.error('Error loading resources:', error);
-        showNotification('Error loading data from cloud', 'error');
-        // Fallback to local storage if needed
-        const stored = localStorage.getItem('ai_agent_resources');
-        if (stored) setResources(JSON.parse(stored));
-      } else if (data) {
-        const parsedData = data.map(r => ({
-          ...r,
-          createdAt: new Date(r.createdAt),
-          updatedAt: new Date(r.updatedAt),
-        }));
-        setResources(parsedData);
-      }
-      setIsLoading(false);
-    }
-
-    loadResources();
+    const stored = loadFromStorage();
+    setResources(stored);
+    setIsLoading(false);
   }, []);
 
   const selectResource = (resource: Resource | null) => {
@@ -70,85 +74,101 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return false;
     }
 
-    const newResource = {
+    const newResource: Resource = {
       id: crypto.randomUUID(),
       name: trimmedName,
       content: `# ${trimmedName}\n\nStart writing your ${type.replace('_', ' ')} configuration here...`,
       type,
       folderPath: type,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
     };
 
-    const { error } = await supabase.from('resources').insert([newResource]);
-
-    if (error) {
-      console.error('Supabase Insert Error:', error);
-      showNotification('Error saving to cloud', 'error');
-      return false;
-    }
-
-    const resourceWithDates = {
-      ...newResource,
-      createdAt: new Date(newResource.createdAt),
-      updatedAt: new Date(newResource.updatedAt)
-    };
-
-    setResources(prev => [resourceWithDates, ...prev]);
-    setSelectedResource(resourceWithDates);
+    const updated = [newResource, ...resources];
+    setResources(updated);
+    setSelectedResource(newResource);
+    saveToStorage(updated);
     showNotification(`${trimmedName} created successfully`, 'success');
     return true;
   };
 
   const updateResource = async (id: string, updates: Partial<Resource>): Promise<boolean> => {
-    const dbUpdates = {
-      ...updates,
-      updatedAt: new Date().toISOString()
-    };
+    setResources(prev => {
+      const updated = prev.map(r =>
+        r.id === id ? { ...r, ...updates, updatedAt: new Date() } : r
+      );
+      saveToStorage(updated);
+      return updated;
+    });
 
-    const { error } = await supabase
-      .from('resources')
-      .update(dbUpdates)
-      .eq('id', id);
-
-    if (error) {
-      console.error('Supabase Update Error:', error);
-      showNotification('Error updating cloud data', 'error');
-      return false;
-    }
-
-    setResources(prev =>
-      prev.map(r =>
-        r.id === id
-          ? { ...r, ...updates, updatedAt: new Date() }
-          : r
-      )
-    );
-    
     if (selectedResource?.id === id) {
       setSelectedResource(prev => prev ? { ...prev, ...updates, updatedAt: new Date() } : null);
     }
+
     showNotification('Changes saved', 'success');
     return true;
   };
 
   const deleteResource = async (id: string) => {
-    const { error } = await supabase
-      .from('resources')
-      .delete()
-      .eq('id', id);
-
-    if (error) {
-      console.error('Supabase Delete Error:', error);
-      showNotification('Error deleting from cloud', 'error');
-      return;
-    }
-
-    setResources(prev => prev.filter(r => r.id !== id));
+    setResources(prev => {
+      const updated = prev.filter(r => r.id !== id);
+      saveToStorage(updated);
+      return updated;
+    });
     if (selectedResource?.id === id) {
       setSelectedResource(null);
     }
     showNotification('Resource deleted', 'info');
+  };
+
+  const exportData = () => {
+    const payload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      resources: resources.map(r => ({
+        ...r,
+        createdAt: r.createdAt.toISOString(),
+        updatedAt: r.updatedAt.toISOString(),
+      })),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ai-agent-manager-${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showNotification('Data exported successfully', 'success');
+  };
+
+  const importData = async (file: File) => {
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+
+      if (!data.resources || !Array.isArray(data.resources)) {
+        showNotification('Invalid file format: missing resources array', 'error');
+        return;
+      }
+
+      const imported: Resource[] = data.resources.map((r: any) => ({
+        id: r.id || crypto.randomUUID(),
+        name: r.name,
+        content: r.content || '',
+        type: r.type,
+        folderPath: r.folderPath || r.type,
+        createdAt: new Date(r.createdAt || Date.now()),
+        updatedAt: new Date(r.updatedAt || Date.now()),
+      }));
+
+      setResources(imported);
+      setSelectedResource(null);
+      saveToStorage(imported);
+      showNotification(`Imported ${imported.length} resources successfully`, 'success');
+    } catch (e) {
+      showNotification('Error importing file. Make sure it\'s a valid JSON export.', 'error');
+      console.error('Import error:', e);
+    }
   };
 
   const showNotification = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
@@ -171,6 +191,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         createResource,
         updateResource,
         deleteResource,
+        exportData,
+        importData,
         showNotification,
         isLoading,
       }}
