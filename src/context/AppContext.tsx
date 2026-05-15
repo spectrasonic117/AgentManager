@@ -1,10 +1,12 @@
 import { createContext, useContext, useState, ReactNode, useEffect } from 'react';
-import { Resource, ResourceType } from '../types';
+import { Resource, ResourceType, Folder } from '../types';
 
 const STORAGE_KEY = 'ai_agent_resources';
+const FOLDER_STORAGE_KEY = 'ai_agent_folders';
 
 interface AppContextType {
   resources: Resource[];
+  folders: Folder[];
   selectedResource: Resource | null;
   searchQuery: string;
   isEditorMode: boolean;
@@ -13,9 +15,12 @@ interface AppContextType {
   setIsEditorMode: (mode: boolean) => void;
   setIsSidebarOpen: (open: boolean) => void;
   selectResource: (resource: Resource | null) => void;
-  createResource: (type: ResourceType, name: string) => Promise<boolean>;
+  createResource: (type: ResourceType, name: string, folderId?: string | null) => Promise<boolean>;
   updateResource: (id: string, updates: Partial<Resource>) => Promise<boolean>;
   deleteResource: (id: string) => Promise<void>;
+  createFolder: (type: ResourceType, name: string, color: string, parentId?: string | null) => Promise<boolean>;
+  updateFolder: (id: string, updates: Partial<Pick<Folder, 'name' | 'color'>>) => Promise<boolean>;
+  deleteFolder: (id: string) => Promise<void>;
   exportData: () => void;
   importData: (file: File) => Promise<void>;
   showNotification: (message: string, type?: 'success' | 'error' | 'info') => void;
@@ -48,8 +53,33 @@ function saveToStorage(resources: Resource[]): void {
   }
 }
 
+function loadFoldersFromStorage(): Folder[] {
+  try {
+    const raw = localStorage.getItem(FOLDER_STORAGE_KEY);
+    if (raw) {
+      return JSON.parse(raw).map((f: any) => ({
+        ...f,
+        createdAt: new Date(f.createdAt),
+        updatedAt: new Date(f.updatedAt),
+      }));
+    }
+  } catch (e) {
+    console.error('Failed to load folders:', e);
+  }
+  return [];
+}
+
+function saveFoldersToStorage(folders: Folder[]): void {
+  try {
+    localStorage.setItem(FOLDER_STORAGE_KEY, JSON.stringify(folders));
+  } catch (e) {
+    console.error('Failed to save folders:', e);
+  }
+}
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const [resources, setResources] = useState<Resource[]>([]);
+  const [folders, setFolders] = useState<Folder[]>([]);
   const [selectedResource, setSelectedResource] = useState<Resource | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [isEditorMode, setIsEditorMode] = useState(true);
@@ -59,7 +89,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const stored = loadFromStorage();
-    setResources(stored);
+    const migrated = stored.map((r: any) => {
+      if ('folderPath' in r && !('folderId' in r)) {
+        const { folderPath, ...rest } = r;
+        return { ...rest, folderId: null };
+      }
+      return r;
+    });
+    setResources(migrated);
+
+    const loadedFolders = loadFoldersFromStorage().map((f: any) => ({
+      ...f,
+      parentId: f.parentId ?? null,
+    }));
+    setFolders(loadedFolders);
     setIsLoading(false);
   }, []);
 
@@ -67,7 +110,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setSelectedResource(resource);
   };
 
-  const createResource = async (type: ResourceType, name: string): Promise<boolean> => {
+  const createResource = async (type: ResourceType, name: string, folderId: string | null = null): Promise<boolean> => {
     const trimmedName = name.trim();
     if (resources.some(r => r.name.toLowerCase() === trimmedName.toLowerCase())) {
       showNotification(`A resource with the name "${trimmedName}" already exists`, 'error');
@@ -79,7 +122,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       name: trimmedName,
       content: `# ${trimmedName}\n\nStart writing your ${type.replace('_', ' ')} configuration here...`,
       type,
-      folderPath: type,
+      folderId,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -121,14 +164,89 @@ export function AppProvider({ children }: { children: ReactNode }) {
     showNotification('Resource deleted', 'info');
   };
 
+  const createFolder = async (type: ResourceType, name: string, color: string, parentId: string | null = null): Promise<boolean> => {
+    const trimmedName = name.trim();
+    if (!trimmedName) return false;
+
+    const siblings = folders.filter(f => f.type === type && f.parentId === parentId);
+    if (siblings.some(f => f.name.toLowerCase() === trimmedName.toLowerCase())) {
+      showNotification(`A folder with the name "${trimmedName}" already exists here`, 'error');
+      return false;
+    }
+
+    const newFolder: Folder = {
+      id: crypto.randomUUID(),
+      name: trimmedName,
+      type,
+      color: color || '#3b82f6',
+      parentId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const updated = [newFolder, ...folders];
+    setFolders(updated);
+    saveFoldersToStorage(updated);
+    showNotification(`Folder "${trimmedName}" created`, 'success');
+    return true;
+  };
+
+  const updateFolder = async (id: string, updates: Partial<Pick<Folder, 'name' | 'color'>>): Promise<boolean> => {
+    setFolders(prev => {
+      const updated = prev.map(f =>
+        f.id === id ? { ...f, ...updates, updatedAt: new Date() } : f
+      );
+      saveFoldersToStorage(updated);
+      return updated;
+    });
+    showNotification('Folder updated', 'success');
+    return true;
+  };
+
+  const deleteFolder = async (id: string) => {
+    const folder = folders.find(f => f.id === id);
+
+    const collectFolderIds = (parentId: string): string[] => {
+      const children = folders.filter(f => f.parentId === parentId);
+      let ids = [parentId];
+      for (const child of children) {
+        ids = ids.concat(collectFolderIds(child.id));
+      }
+      return ids;
+    };
+
+    const idsToDelete = collectFolderIds(id);
+
+    setFolders(prev => {
+      const updated = prev.filter(f => !idsToDelete.includes(f.id));
+      saveFoldersToStorage(updated);
+      return updated;
+    });
+    setResources(prev => {
+      const updated = prev.map(r =>
+        idsToDelete.includes(r.folderId ?? '') ? { ...r, folderId: null } : r
+      );
+      saveToStorage(updated);
+      return updated;
+    });
+    if (folder) {
+      showNotification(`Folder "${folder.name}" deleted`, 'info');
+    }
+  };
+
   const exportData = () => {
     const payload = {
-      version: 1,
+      version: 3,
       exportedAt: new Date().toISOString(),
       resources: resources.map(r => ({
         ...r,
         createdAt: r.createdAt.toISOString(),
         updatedAt: r.updatedAt.toISOString(),
+      })),
+      folders: folders.map(f => ({
+        ...f,
+        createdAt: f.createdAt.toISOString(),
+        updatedAt: f.updatedAt.toISOString(),
       })),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -156,14 +274,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
         name: r.name,
         content: r.content || '',
         type: r.type,
-        folderPath: r.folderPath || r.type,
+        folderId: r.folderId ?? null,
         createdAt: new Date(r.createdAt || Date.now()),
         updatedAt: new Date(r.updatedAt || Date.now()),
       }));
 
+      const importedFolders: Folder[] = Array.isArray(data.folders)
+        ? data.folders.map((f: any) => ({
+            id: f.id || crypto.randomUUID(),
+            name: f.name,
+            type: f.type,
+            color: f.color || '#3b82f6',
+            parentId: f.parentId ?? null,
+            createdAt: new Date(f.createdAt || Date.now()),
+            updatedAt: new Date(f.updatedAt || Date.now()),
+          }))
+        : [];
+
       setResources(imported);
+      setFolders(importedFolders);
       setSelectedResource(null);
       saveToStorage(imported);
+      saveFoldersToStorage(importedFolders);
       showNotification(`Imported ${imported.length} resources successfully`, 'success');
     } catch (e) {
       showNotification('Error importing file. Make sure it\'s a valid JSON export.', 'error');
@@ -180,6 +312,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     <AppContext.Provider
       value={{
         resources,
+        folders,
         selectedResource,
         searchQuery,
         isEditorMode,
@@ -191,6 +324,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         createResource,
         updateResource,
         deleteResource,
+        createFolder,
+        updateFolder,
+        deleteFolder,
         exportData,
         importData,
         showNotification,

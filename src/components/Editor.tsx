@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Save, Eye, Edit3, Copy, Trash2, Check } from 'lucide-react';
+import { Save, Eye, Edit3, Copy, Trash2, Check, Download } from 'lucide-react';
 import { useApp } from '../context/AppContext';
+import { Modal } from './Modal';
 
 export function Editor() {
   const { selectedResource, isEditorMode, setIsEditorMode, updateResource, deleteResource, showNotification } = useApp();
@@ -10,6 +11,7 @@ export function Editor() {
   const [content, setContent] = useState('');
   const [hasChanges, setHasChanges] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
 
   useEffect(() => {
     if (selectedResource) {
@@ -34,9 +36,25 @@ export function Editor() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleDelete = async () => {
-    if (selectedResource && confirm(`Are you sure you want to delete "${selectedResource.name}"?`)) {
+  const handleDownload = () => {
+    if (!selectedResource) return;
+    const blob = new Blob([content], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${name || 'resource'}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDelete = () => {
+    setShowDeleteModal(true);
+  };
+
+  const confirmDelete = async () => {
+    if (selectedResource) {
       await deleteResource(selectedResource.id);
+      setShowDeleteModal(false);
     }
   };
 
@@ -99,6 +117,14 @@ export function Editor() {
             ) : (
               <Copy className="w-4 h-4 text-slate-400 group-hover:text-slate-300" />
             )}
+          </button>
+
+          <button
+            onClick={handleDownload}
+            className="p-2 hover:bg-slate-800/50 rounded-lg transition-colors group"
+            title="Download as markdown"
+          >
+            <Download className="w-4 h-4 text-slate-400 group-hover:text-slate-300" />
           </button>
 
           <div className="flex items-center gap-1 bg-slate-800/50 rounded-lg p-1">
@@ -167,6 +193,33 @@ export function Editor() {
           </div>
         )}
       </div>
+
+      <Modal
+        isOpen={showDeleteModal}
+        onClose={() => setShowDeleteModal(false)}
+        title="Delete Resource"
+        size="sm"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-slate-300">
+            Are you sure you want to delete <span className="font-semibold text-slate-200">"{selectedResource?.name}"</span>?
+          </p>
+          <div className="flex gap-2 justify-end">
+            <button
+              onClick={() => setShowDeleteModal(false)}
+              className="px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-800/50 rounded-lg transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={confirmDelete}
+              className="px-3 py-1.5 text-sm bg-red-500/20 text-red-300 border border-red-400/30 rounded-lg hover:bg-red-500/30 transition-colors"
+            >
+              Delete
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
